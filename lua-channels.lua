@@ -248,6 +248,10 @@ local function altcopy(a, b)
          r.alt_array.value = TIMEOUT
          r.alt_array.resolved = 1
          return true
+      elseif r.closed then
+         r.alt_array.value = nil
+         r.alt_array.resolved = 1
+         return true
       else
          r.alt_array.value = c._buf:pop()
       end
@@ -290,14 +294,14 @@ altexec = function (a)
    local other_alts = c:_get_other_alts(op)
    local other_a = other_alts:random(a.to)
    -- other_a may be nil
-   local isto = altcopy(a, other_a)
+   local isend = altcopy(a, other_a)
 
    if other_a ~= nil then
       -- Disengage from channels used by the other Alt and make it ready.
       altalldequeue(other_a.alt_array)
       other_a.alt_array.resolved = other_a.alt_index
       task_ready(other_a.alt_array.task)
-   elseif isto then
+   elseif isend then
       task_ready(a.alt_array.task)
    end
 end
@@ -332,7 +336,7 @@ local function chanalt(alt_array, canblock)
    if #list_of_canexec_i > 0 then
       local i = random_choice(list_of_canexec_i)
       altexec(alt_array[i])
-      return i, alt_array.value
+      return i, alt_array.value, alt_array.closed == nil
    end
 
    if canblock ~= true then
@@ -357,7 +361,7 @@ local function chanalt(alt_array, canblock)
    assert(alt_array.resolved > 0)
 
    local r = alt_array.resolved
-   return r, alt_array.value
+   return r, alt_array.value, alt_array.closed == nil
 end
 
 
@@ -381,7 +385,7 @@ local Channel = {
       local alts = {{c = self, op = RECV, to = to and os.time() + to or nil}}
       local s, msg = chanalt(alts, true)
       assert(s == 1)
-      return msg
+      return msg, alts[1].closed == nil
    end,
 
    nbsend = function(self, msg)
@@ -392,6 +396,14 @@ local Channel = {
    nbrecv = function(self)
       local s, msg = chanalt({{c = self, op = RECV}}, false)
       return s == 1, msg
+   end,
+
+   close = function(self)
+      local alts = self:_get_alts(RECV)
+      for _, v in ipairs(alts.l) do
+         v.closed = true
+         altexec(v)
+      end
    end,
 
    _get_alts = function(self, op)
@@ -674,6 +686,35 @@ local tests = {
       assert(done)
    end,
 
+   close_test = function()
+      local values = {}
+      for i = 1, 1000 do table.insert(values, i) end
+      local chan = task.Channel:new()
+      local done = task.Channel:new()
+      task.spawn(function()
+            local i = 0
+            while true do
+               local msg, more = chan:recv()
+               if not more then
+                  break
+               else
+                  i = i + 1
+               end
+            end
+            assert(i == 200)
+            done:send(1)
+      end)
+
+      task.spawn(function()
+            for i =1, 200 do
+               chan:send(i)
+            end
+            chan:close()
+      end)
+
+      task.scheduler()
+   end,
+
    recv_timeout = function()
       print("\t testing... (this will block 8 seconds)")
       -- use copas to sleep
@@ -721,7 +762,6 @@ local tests = {
 
       local r4 = function()
          local v = chan:recv(6)
-         print(v)
          assert(exists(values, v))
       end
 
